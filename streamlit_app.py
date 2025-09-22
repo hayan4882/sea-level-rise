@@ -1,483 +1,509 @@
-# streamlit_app.py
-# Streamlit 앱: 한국어 UI로 공식 공개 데이터 기반 해수면 상승 대시보드 + 사용자 입력(프롬프트 기반) 대시보드
-# 작성자: AI (Streamlit + GitHub Codespaces-ready)
-# 출처(예시, 코드 주석으로 명확히 남김):
-# - NASA/JPL Global Mean Sea Level (GMSL) & altimetry resources: https://sealevel.jpl.nasa.gov/ and https://podaac.jpl.nasa.gov/dataset/NASA_SSH_GMSL_INDICATOR  (데이터 다운로드 페이지)
-# - PSMSL (Permanent Service for Mean Sea Level) tide gauge 데이터: https://psmsl.org/ (개별 관측소 및 전체 데이터)
-# - NOAA Sea Level Trends / Sea Level Rise Viewer data: https://coast.noaa.gov/slrdata/ and https://tidesandcurrents.noaa.gov/sltrends/
-# - 대한민국(국내) 해수면 관련 오픈데이터(예시): https://www.data.go.kr/ (국립해양조사원 관련 API 및 파일, ex: 해수면 주간 전망 통계)
+# -*- coding: utf-8 -*-
+# =========================================================
+# 📊 보고서 맞춤 대시보드 (민트+브라운 테마)
+# ---------------------------------------------------------
+# 구조:
+#   1) 🥠 포춘쿠키: 버튼을 눌러 랜덤 실천 카드 보기(6개 이상)
+#   2) 🔬 데이터 관측실: 더미 데이터 기반 라인/막대/지도 상호작용(지표/지역/연도 범위)
+#   3) 🗂️ 자료실: 출처/참고 링크 모음 (클릭 열람)
 #
-# 위 URL들은 데이터 소스 위치(참고)이며, 실제 자동 다운로드가 불가하거나 API 실패 시 예시 데이터로 자동 대체됩니다.
-# (요구사항) API 실패 시 재시도 -> 실패하면 예시 데이터로 대체하며 사용자에게 한국어 안내 표시합니다.
+# 폰트: /fonts/Pretendard-Bold.ttf (있으면 적용, 없으면 생략)
+# 표준화: date, value, group
+# 전처리: 결측/형변환/중복 제거/미래(로컬 자정 이후) 제거
+# 캐싱: @st.cache_data
+# 내보내기: 관측실의 전처리된 표 CSV 다운로드 제공
+#
+# ※ 공개 데이터 실제 호출은 본 앱에서는 하지 않습니다(시연용 더미 데이터).
+#     공개 데이터 연결이 필요한 경우: NASA/NOAA/World Bank 등 API를 동일 스키마로 붙이면 됩니다.
+#
+# ★ 실행 오류 발생 시 아래 명령어로 필수 라이브러리 설치 후 실행하세요.
+#     pip install -r requirements.txt
+# =========================================================
 
-import io
-import time
-from datetime import datetime, date
-from typing import Tuple
+import os
+import random
+from datetime import datetime
+from typing import List
+from dateutil import tz
 
-import requests
-import pandas as pd
 import numpy as np
+import pandas as pd
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
+import matplotlib
+from matplotlib import font_manager
 
-# -------------------------
-# 설정: 로컬 '오늘' 기준 (개발자 지침: Asia/Seoul 타임존, 현재 날짜 2025-09-18)
-# 실제 환경에서는 datetime.today() 사용하되 여기서는 시스템 시간 사용
-TODAY = pd.to_datetime(datetime.now().date())
+APP_TITLE = "📊 내일은 물 위의 학교? — 인터랙티브 보고서 대시보드"
+LOCAL_TZ = tz.gettz("Asia/Seoul")
 
-# Pretendard 폰트 시도: /fonts/Pretendard-Bold.ttf (없으면 무시)
-PRETENDARD_PATH = "/fonts/Pretendard-Bold.ttf"
-
-# Streamlit 페이지 설정
-st.set_page_config(
-    page_title="해수면 상승 대시보드 / 청소년 영향 분석",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# 전역 스타일(시도): Pretendard 적용 (브라우저에서 로컬 폰트가 없으면 무시)
-def inject_global_css():
-    css = ""
+# ---------------------------
+# 폰트 적용 시도 (Pretendard)
+# ---------------------------
+def _try_set_pretendard() -> None:
+    """시스템에 Pretendard 폰트가 있으면 적용하고, 없으면 기본 폰트 사용"""
     try:
-        with open(PRETENDARD_PATH, "rb"):
-            css = f"""
-            <style>
-            @font-face {{
-                font-family: 'Pretendard';
-                src: url('{PRETENDARD_PATH}');
-            }}
-            html, body, .css-1d391kg, .stApp {{
-                font-family: 'Pretendard', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
-            }}
-            </style>
-            """
+        # Streamlit 앱 배포 환경에서는 이 경로에 폰트를 둘 수 없습니다.
+        # 실제 폰트를 사용하려면 Streamlit 설정(config.toml) 또는
+        # Streamlit Cloud의 Secrets를 사용해 폰트 파일을 업로드해야 합니다.
+        font_path = "/fonts/Pretendard-Bold.ttf"
+        if os.path.exists(font_path):
+            font_manager.fontManager.addfont(font_path)
+            matplotlib.rcParams["font.family"] = "Pretendard"
+        st.session_state.setdefault("base_font_family", "Pretendard")
     except Exception:
-        # 파일 없으면 기본 폰트 사용
-        css = """
-        <style>
-        html, body, .stApp { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; }
-        </style>
-        """
-    st.markdown(css, unsafe_allow_html=True)
+        # 폰트 적용 실패 시 기본 폰트로 폴백
+        st.session_state.setdefault("base_font_family", "sans-serif")
 
-inject_global_css()
+_try_set_pretendard()
 
-# -------------------------
-# 유틸리티: 재시도 요청 및 예시 데이터 제공
-def robust_get_csv(url: str, headers=None, timeout=10, retries=2) -> Tuple[pd.DataFrame, bool]:
-    """
-    URL에서 CSV를 시도하여 읽음. (재시도 허용)
-    반환: (DataFrame or None, success_flag)
-    """
-    attempt = 0
-    while attempt <= retries:
-        try:
-            r = requests.get(url, headers=headers, timeout=timeout)
-            r.raise_for_status()
-            # 판다스로 읽기
-            content = r.content
-            df = pd.read_csv(io.BytesIO(content))
-            return df, True
-        except Exception as e:
-            attempt += 1
-            time.sleep(1)
-            if attempt > retries:
-                return None, False
-    return None, False
+# ---------------------------
+# 민트+브라운 테마 CSS
+# ---------------------------
+THEME_MINT = "#2dd4bf"   # 민트
+THEME_BROWN = "#8b5e34"  # 브라운
+THEME_BG = "#fbf8f5"    # 따뜻한 베이지 배경
+THEME_CARD = "#ffffff"  # 카드 배경
 
-# 캐시: 외부 데이터 가져오기
+_CSS = f"""
+<style>
+:root {{
+  --mint: {THEME_MINT};
+  --brown: {THEME_BROWN};
+  --bg: {THEME_BG};
+  --card: {THEME_CARD};
+}}
+html, body, .block-container {{ background-color: var(--bg); }}
+.block-container {{padding-top: 0.8rem; padding-bottom: 1.0rem;}}
+h1, h2, h3, h4 {{ color: var(--brown); margin-bottom: .5rem; }}
+hr {{ margin: .6rem 0 .9rem 0; border-color: #e2e8f0; }}
+.card {{
+  background: var(--card);
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  padding: 14px 16px;
+  box-shadow: 0 1px 0 rgba(0,0,0,0.03);
+}}
+.badge {{
+  display:inline-block; padding:2px 8px; border-radius: 999px;
+  background: var(--mint); color: #064e3b; font-weight:700; font-size:.75rem;
+}}
+.small {{ color:#6b7280; font-size:.9rem; }}
+.mini {{ color:#666; font-size:.85rem; }}
+.stButton>button, .stDownloadButton>button {{
+  border-radius: 12px;
+  border: 1px solid var(--brown);
+  background: var(--mint);
+  color: #064e3b;
+  font-weight: 700;
+}}
+</style>
+"""
+st.markdown(_CSS, unsafe_allow_html=True)
+
+# ---------------------------
+# 공통 유틸
+# ---------------------------
+def truncate_future_rows(df: pd.DataFrame, date_col: str = "date") -> pd.DataFrame:
+    """로컬 자정 이후 데이터 제거"""
+    out = df.copy()
+    if date_col in out.columns:
+        out[date_col] = pd.to_datetime(out[date_col], errors="coerce")
+        now_local = datetime.now(LOCAL_TZ)
+        today_midnight = datetime(now_local.year, now_local.month, now_local.day, tzinfo=LOCAL_TZ)
+        cutoff = today_midnight.replace(tzinfo=None)
+        out = out[out[date_col] < cutoff]
+    return out.dropna().drop_duplicates()
+
+def style_plot(fig: go.Figure, title: str, xlab: str, ylab: str) -> go.Figure:
+    """Plotly 차트에 공통 스타일 적용"""
+    base_font = st.session_state.get("base_font_family", "sans-serif")
+    fig.update_layout(
+        title=title,
+        font=dict(family=base_font, size=14, color=THEME_BROWN),
+        xaxis_title=xlab,
+        yaxis_title=ylab,
+        hovermode="x unified",
+        margin=dict(l=40, r=18, t=50, b=36),
+        paper_bgcolor=THEME_BG,
+        plot_bgcolor="#ffffff",
+        colorway=[THEME_MINT, THEME_BROWN, "#0ea5e9", "#65a30d"],
+        legend=dict(bgcolor="#ffffff", bordercolor="#e5e7eb", borderwidth=1)
+    )
+    return fig
+
+# ---------------------------
+# 더미 데이터 생성기 (지표/지역별)
+# ---------------------------
 @st.cache_data(show_spinner=False)
-def load_public_gmsl_data() -> Tuple[pd.DataFrame, bool, str]:
-    """
-    NASA/JPL 또는 대체 소스에서 전지구 평균 해수면(GMSL) 시계열을 시도하여 불러옴.
-    실패 시 예시 데이터 반환.
-    """
-    # 가능한 데이터 소스(우선순위)
-    urls = [
-        # JPL PO.DAAC / GMSL (사용자 환경에 따라 다운로드 URL이 다를 수 있음)
-        "https://podaac.jpl.nasa.gov/dataset/NASA_SSH_GMSL_INDICATOR",
-        # DataHub core sea-level-rise (CSV 제공)
-        "https://datahub.io/core/sea-level-rise/r/sea-level-rise.csv",
-        # Kaggle mirror (읽기 불가 가능성 있음)
-        "https://raw.githubusercontent.com/datasets/global-sea-level/master/data/observations.csv",
-    ]
-    for url in urls:
-        df, ok = robust_get_csv(url)
-        if ok and isinstance(df, pd.DataFrame):
-            # 표준화: date, value
-            # 다양한 컬럼 이름 대응
-            df_cols = [c.lower() for c in df.columns]
-            # try to find year/month/date and sea level value
-            if "year" in df_cols and "gmsl" in df_cols:
-                # custom handling
-                d = df.copy()
-                if "month" in df_cols:
-                    d["date"] = pd.to_datetime(d["year"].astype(int).astype(str) + "-" + d["month"].astype(int).astype(str) + "-01", errors="coerce")
-                else:
-                    d["date"] = pd.to_datetime(d["year"].astype(int).astype(str) + "-01-01", errors="coerce")
-                # pick gmsl or 'sea_level' columns heuristically
-                val_col = None
-                for cand in df.columns:
-                    if "gmsl" in cand.lower() or "sea_level" in cand.lower() or "absolute" in cand.lower():
-                        val_col = cand
-                        break
-                if val_col is None:
-                    val_col = df.columns[-1]
-                d = d[["date", val_col]].rename(columns={val_col: "value"})
-                d = d.dropna(subset=["date", "value"])
-                return d, True, url
-            # generic: look for a 'date' like column
-            date_col = None
-            for c in df.columns:
-                if "date" in c.lower() or "year" in c.lower():
-                    date_col = c
-                    break
-            value_col = None
-            for c in df.columns:
-                if "sea" in c.lower() and ("level" in c.lower() or "gmsl" in c.lower()):
-                    value_col = c
-                    break
-            if date_col is None:
-                # try first col as date
-                date_col = df.columns[0]
-            if value_col is None:
-                # try last col
-                value_col = df.columns[-1]
-            d = df[[date_col, value_col]].copy()
-            d.columns = ["date", "value"]
-            # try parse date
-            try:
-                d["date"] = pd.to_datetime(d["date"])
-            except Exception:
-                # if year-only
-                try:
-                    d["date"] = pd.to_datetime(d["date"].astype(int).astype(str) + "-01-01")
-                except Exception:
-                    pass
-            d = d.dropna(subset=["date", "value"])
-            return d, True, url
-    # 모두 실패 -> 예시 데이터 생성 (연도별 GMSL 1880~2024 가상치)
-    years = np.arange(1880, 2025)
-    # 누적 추세 난수 기반 (예시용)
-    base = (years - 1880) * 0.2  # 단순 누적 예시
-    noise = np.random.normal(loc=0.0, scale=0.5, size=len(years))
-    values = base + noise
-    d = pd.DataFrame({"date": pd.to_datetime(years.astype(str) + "-01-01"), "value": values})
-    return d, False, "예시 데이터(내장)"
+def make_dummy_series(kind: str, region: str, year_start: int = 1990, year_end: int = 2025) -> pd.DataFrame:
+    """지표(kind)와 지역(region)에 따라 그럴듯한 시계열 더미 생성"""
+    rng = pd.date_range(f"{year_start}-01-01", f"{year_end}-12-01", freq="MS")
+    base = np.linspace(0, 1, len(rng))
+    noise = np.random.default_rng(42).normal(0, 0.05, len(rng))
+
+    # 지표별 스케일/추세
+    if kind == "해수면":
+        trend = 30 * base   # mm 상승 가정
+        seasonal = 2.0 * np.sin(np.linspace(0, 8*np.pi, len(rng)))
+        values = 10 + trend + seasonal + noise*5
+        unit = "mm"
+    elif kind == "해수온":
+        trend = 0.6 * base  # ℃ 상승 가정
+        seasonal = 0.15 * np.sin(np.linspace(0, 12*np.pi, len(rng)))
+        values = 0.2 + trend + seasonal + noise*0.5
+        unit = "℃"
+    else:   # 폭염일수
+        trend = 10 * base
+        seasonal = 2.5 * np.sin(np.linspace(0, 6*np.pi, len(rng)))
+        values = 2 + trend + seasonal + noise*3
+        values = np.clip(values, 0, None)
+        unit = "일"
+
+    # 지역 보정
+    if region == "대한민국":
+        values = values * 1.1 + 1.0
+    else:   # 세계 평균
+        values = values
+
+    df = pd.DataFrame({
+        "date": rng,
+        "value": values,
+        "group": f"{region}·{kind}({unit})"
+    })
+    df = truncate_future_rows(df, "date").sort_values("date")
+    return df
 
 @st.cache_data(show_spinner=False)
-def load_psmsl_station(korean_station_name: str = "MASAN") -> Tuple[pd.DataFrame, bool, str]:
-    """
-    PSMSL에서 특정 관측소(예시: MASAN) 시계열 다운로드 시도.
-    실패 시 예시 관측소 데이터 반환.
-    """
-    # PSMSL station pages provide downloads; use known station file path pattern if available
-    # 예시: https://psmsl.org/data/obtaining/stations/2044.php (MASAN)
-    # 하지만 안정적 CSV URL은 보장되지 않으므로 시도 후 실패하면 예시 데이터 생성
-    # 시도 URL (station id may vary)
-    try_urls = [
-        "https://psmsl.org/data/obtaining/stations/2044.php",  # MASAN page (html)
-        "https://psmsl.org/data/psmsl.csv"  # placeholder
-    ]
-    for url in try_urls:
-        df, ok = robust_get_csv(url)
-        if ok and isinstance(df, pd.DataFrame):
-            # try to standardize
-            cols = df.columns
-            if len(cols) >= 2:
-                d = df.iloc[:, :2].copy()
-                d.columns = ["date", "value"]
-                try:
-                    d["date"] = pd.to_datetime(d["date"])
-                except Exception:
-                    pass
-                d = d.dropna(subset=["date", "value"])
-                return d, True, url
-    # 실패 -> 예시: 대한민국 연안(2004-2023) 월별 가상치(또는 연간)
-    rng = pd.date_range(start="2004-01-01", end="2023-12-01", freq="MS")
-    # 가벼운 상승 추세 (mm 단위)
-    trend = np.linspace(0, 30, len(rng))  # 총 30mm 상승 예시
-    seasonal = 5 * np.sin(np.linspace(0, 4 * np.pi, len(rng)))
-    noise = np.random.normal(0, 2, len(rng))
-    values = trend + seasonal + noise
-    d = pd.DataFrame({"date": rng, "value": values})
-    return d, False, "예시 대한민국 연안 데이터(내장)"
-
-# -------------------------
-# 사용자 입력(프롬프트 기반) 데이터: 사용자가 제공한 '보고서 계획표' 텍스트를 바탕으로
-# - 실제 CSV/이미지가 업로드되지 않았으므로, 규칙에 따라 '입력 섹션'의 설명만 사용해 내부 예시 CSV 생성
-# (앱 실행 중 파일 업로드/입력 요구 금지)
-@st.cache_data(show_spinner=False)
-def load_user_input_data() -> dict:
-    """
-    프롬프트의 Input 섹션(보고서 계획표)에 있는 설명만 사용하여 내부 예시 데이터 생성.
-    생성 데이터:
-      - korea_sealevel_20y: 지난 20년(2004-2023) 연평균 해수면(mm) 및 연평균 기온(°C) 가상 데이터
-      - youth_survey: 청소년 기후 불안 설문 비율(예시: 매우그렇다/그렇다/느끼지않음)
-      - youth_future_jobs: 청소년 미래 직업에 대한 기후 인식 설문(범주별 가중치 예시)
-      - country_compare: 국가별 해수면 상승 예상치(예시)
-    """
-    # 1) 대한민국 해수면 변화 추이 (연간)
-    years = np.arange(2004, 2024)
-    # 가상의 연평균 해수면(mm, 상대값), 온도(°C)
-    # 사용자가 문서에서 '지난 20년간 기온에 따른 해수면 상승 변화' 요구 -> 생성 시 상관관계 반영
-    temp = 13.0 + 0.03 * (years - 2004) + np.random.normal(0, 0.1, len(years))  # 평균기온 가벼운 상승
-    sealevel = 0.0 + 2.0 * (years - 2004) + (temp - temp.mean()) * 5 + np.random.normal(0, 3, len(years))
-    korea_sealevel_20y = pd.DataFrame({"date": pd.to_datetime(years.astype(str) + "-01-01"), "value_mm": sealevel, "temp_c": temp})
-    # 2) 청소년 설문(비율)
-    youth_survey = pd.DataFrame({
-        "응답": ["매우 그렇다", "그렇다", "불안감을 느끼지 않는다"],
-        "비율": [24.8, 51.5, 23.7]
-    })
-    # 3) 청소년 미래 직업에 대한 기후위기 인식 (예시 항목)
-    youth_future_jobs = pd.DataFrame({
-        "영향_정도": ["매우 영향", "약간 영향", "영향 없음", "모름"],
-        "응답수": [420, 310, 150, 70]
-    })
-    # 4) 국가별 해수면 상승 예상치(예시 막대그래프)
-    country_compare = pd.DataFrame({
-        "국가": ["대한민국", "호주", "미국", "인도네시아", "몰디브"],
-        "예상_상승_cm_2100": [50, 60, 45, 75, 120]
-    })
-    return {
-        "korea_sealevel_20y": korea_sealevel_20y,
-        "youth_survey": youth_survey,
-        "youth_future_jobs": youth_future_jobs,
-        "country_compare": country_compare
+def make_dummy_bar(kind: str, region: str) -> pd.DataFrame:
+    """막대용 카테고리 더미(최근 연도 기준)"""
+    cats = {
+        "해수면": ["침식·방파제 보강", "내륙침수 대비", "연안관리 예산", "주거이동 지원"],
+        "해수온": ["어장 변화", "산호 백화", "해양열파", "연안 생태"],
+        "폭염일수": ["냉방부하", "야외활동 제한", "열 관련 질환", "전력피크"]
     }
+    base = np.array([40, 55, 30, 35], dtype=float)
+    if region == "대한민국": base = base * 1.1
+    if kind == "해수온": base = base * np.array([0.9, 1.2, 1.3, 1.0])
+    if kind == "해수면": base = base * np.array([1.3, 1.1, 1.0, 1.2])
+    if kind == "폭염일수": base = base * np.array([1.4, 1.2, 1.3, 1.5])
+    return pd.DataFrame({"항목": cats.get(kind, []), "비율(%)": np.round(base, 1)})
 
-# -------------------------
-# 데이터 불러오기 (공개 데이터)
-public_gmsl_df, public_gmsl_ok, public_gmsl_source = load_public_gmsl_data()
-psmsl_df, psmsl_ok, psmsl_source = load_psmsl_station()
-
-# 전처리 공통 함수
-def preprocess_timeseries(df: pd.DataFrame, date_col="date", value_col="value") -> pd.DataFrame:
-    d = df.copy()
-    # 표준 컬럼명으로 변경
-    d = d.rename(columns={date_col: "date", value_col: "value"})
-    # 형변환
-    d["date"] = pd.to_datetime(d["date"], errors="coerce")
-    # 결측 제거
-    d = d.dropna(subset=["date", "value"])
-    # 중복 제거: 날짜 기준 평균
-    d = d.groupby("date", as_index=False).agg({"value": "mean"})
-    # 미래 데이터 제거 (오늘 이후)
-    d = d.loc[d["date"] <= TODAY]
-    # 정렬
-    d = d.sort_values("date")
-    return d
-
-# 공용 전처리
-if isinstance(public_gmsl_df, pd.DataFrame):
-    public_gmsl_df = preprocess_timeseries(public_gmsl_df, date_col="date", value_col="value")
-else:
-    public_gmsl_df = pd.DataFrame(columns=["date", "value"])
-
-if isinstance(psmsl_df, pd.DataFrame):
-    psmsl_df = preprocess_timeseries(psmsl_df, date_col="date", value_col="value")
-else:
-    psmsl_df = pd.DataFrame(columns=["date", "value"])
-
-# 사용자 입력(프롬프트) 데이터 로드
-user_data = load_user_input_data()
-
-# -------------------------
-# 인터페이스: 사이드바(필터 자동 구성)
-st.sidebar.title("대시보드 옵션")
-data_choice = st.sidebar.radio("표시 데이터 선택", ("공개 데이터: 전지구 평균 해수면", "공개 데이터: 국내 연안 관측소(예시)", "사용자 입력(보고서 기반)"))
-
-# 날짜 범위 필터 (자동 구성)
-if data_choice == "공개 데이터: 전지구 평균 해수면":
-    if not public_gmsl_df.empty:
-        min_d, max_d = public_gmsl_df["date"].min(), public_gmsl_df["date"].max()
+def bar_percent(df: pd.DataFrame, horizontal: bool = True, title: str = "") -> go.Figure:
+    """막대 차트를 생성하고 스타일을 적용"""
+    if horizontal:
+        fig = px.bar(df, x="비율(%)", y="항목", orientation="h", text="비율(%)")
     else:
-        min_d, max_d = pd.to_datetime("1880-01-01"), TODAY
-elif data_choice == "공개 데이터: 국내 연안 관측소(예시)":
-    if not psmsl_df.empty:
-        min_d, max_d = psmsl_df["date"].min(), psmsl_df["date"].max()
-    else:
-        min_d, max_d = pd.to_datetime("2004-01-01"), pd.to_datetime("2023-12-01")
-else:
-    # 사용자 데이터(대한민국 2004-2023)
-    korea_df = user_data["korea_sealevel_20y"]
-    min_d, max_d = korea_df["date"].min(), korea_df["date"].max()
+        fig = px.bar(df, x="항목", y="비율(%)", text="비율(%)")
+    fig.update_traces(textposition="outside", marker_line_color=THEME_BROWN, marker_line_width=1.2)
+    return style_plot(fig, title, "비율(%)" if horizontal else "항목", "항목" if horizontal else "비율(%)")
 
-# 사이드바: 기간 선택
-start_date = st.sidebar.date_input("시작일", min_value=min_d.date(), max_value=max_d.date(), value=min_d.date())
-end_date = st.sidebar.date_input("종료일", min_value=min_d.date(), max_value=max_d.date(), value=max_d.date())
-if start_date > end_date:
-    st.sidebar.error("시작일이 종료일보다 빠르게 설정해 주세요.")
-# 스무딩 옵션 (이동평균)
-smoothing = st.sidebar.slider("이동평균 윈도우(개월)", min_value=1, max_value=24, value=3)
-
-# -------------------------
-# 메인: 헤더
-st.title("🌊🏫 내일은 물 위의 학교? — 해수면 상승 대시보드")
-st.markdown(
+# ----- 지도를 위한 함수를 이 부분에 추가합니다. -----
+def create_interactive_map():
     """
-    **설명:** 이 대시보드는 공식 공개 데이터(NASA/PSMSL/국내 오픈데이터)를 먼저 시도하여 시각화한 뒤,
-    사용자가 입력(프롬프트로 제공한 보고서 계획표)한 내용을 기반으로 별도의 대시보드를 제공합니다.
-    모든 라벨과 UI는 한국어로 제공됩니다.
+    전 세계 해수면 상승 데이터를 시각화하는 상호작용 지도입니다.
+    마우스 커서를 올리면 국가 이름과 해수면 상승률이 표시됩니다.
     """
-)
-
-# 공개 데이터 섹션
-st.header("1. 공식 공개 데이터 대시보드 (자동 연결 시도)")
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.subheader("전지구 평균 해수면 (GMSL) — NASA/JPL 등")
-    if public_gmsl_ok:
-        st.success(f"공개 데이터 로드 성공 (출처 자동 감지): {public_gmsl_source}")
-    else:
-        st.warning("공개 데이터 로드에 실패하여 **예시 데이터**로 대체했습니다. (네트워크 또는 소스 문제)")
-        st.info("출처(참고): NASA Sea Level Change Portal / DataHub / 기타. 실제 작업 시 안정적 URL을 설정하세요.")
-    # 필터 적용
-    df_show = public_gmsl_df.copy()
-    if not df_show.empty:
-        mask = (df_show["date"] >= pd.to_datetime(start_date)) & (df_show["date"] <= pd.to_datetime(end_date))
-        df_show = df_show.loc[mask]
-        # 이동평균
-        if smoothing > 1:
-            df_show["value_smooth"] = df_show["value"].rolling(window=smoothing, min_periods=1, center=False).mean()
-        else:
-            df_show["value_smooth"] = df_show["value"]
-        # 플롯
-        fig = px.line(df_show, x="date", y=["value", "value_smooth"], labels={"value": "원시값", "value_smooth": f"{smoothing}개월 이동평균", "date":"날짜"}, title="전지구 평균 해수면 시계열")
-        fig.update_layout(legend_title_text="데이터")
-        st.plotly_chart(fig, use_container_width=True)
-        # 표 및 다운로드
-        st.markdown("#### 데이터 표 (전처리된 데이터)")
-        st.dataframe(df_show.rename(columns={"date":"날짜","value":"값","value_smooth":"이동평균"}).reset_index(drop=True).head(50))
-        csv = df_show.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("전처리된 데이터 CSV 다운로드", data=csv, file_name="public_gmsl_preprocessed.csv", mime="text/csv")
-    else:
-        st.info("표시할 공개 GMSL 데이터가 없습니다.")
-
-with col2:
-    st.subheader("데이터 연결 정보")
-    st.markdown(f"- 전지구 평균 데이터 소스: `{public_gmsl_source}`")
-    st.markdown(f"- PSMSL(관측소) 소스 예시: `{psmsl_source}`")
-    st.markdown("- API 실패 시: 예시 데이터로 자동 대체됩니다.")
-    st.markdown("**참고(데이터 출처 예시)**:")
-    st.markdown("""
-    - NASA Sea Level Change Portal (시계열/시나리오): sealevel.nasa.gov  
-    - PSMSL (tide gauge): psmsl.org  
-    - NOAA Sea Level Rise Viewer data: coast.noaa.gov/slrdata/
-    """)
-
-# 공개 데이터: 관측소 (국내 연안 예시)
-st.header("2. 공개 데이터: 국내 연안 관측(예시) — PSMSL / KHOA 연계")
-st.markdown("국내 관측소 데이터(예시)는 PSMSL에서 제공되는 관측소 데이터를 시도하여 가져옵니다. 실패 시 예시 데이터로 표시됩니다.")
-if psmsl_ok:
-    st.success(f"관측소 데이터 로드 성공 (출처): {psmsl_source}")
-else:
-    st.warning("관측소 데이터 로드 실패 — 예시 대한민국 연안 데이터로 대체되었습니다.")
-
-if not psmsl_df.empty:
-    mask = (psmsl_df["date"] >= pd.to_datetime(start_date)) & (psmsl_df["date"] <= pd.to_datetime(end_date))
-    psmsl_show = psmsl_df.loc[mask].copy()
-    if smoothing > 1:
-        psmsl_show["value_smooth"] = psmsl_show["value"].rolling(window=smoothing, min_periods=1).mean()
-    else:
-        psmsl_show["value_smooth"] = psmsl_show["value"]
-    fig2 = px.line(psmsl_show, x="date", y=["value", "value_smooth"], labels={"value":"원시값(mm)","value_smooth":f"{smoothing}개월 이동평균","date":"날짜"}, title="국내 연안 관측소 해수면(예시) 시계열")
-    st.plotly_chart(fig2, use_container_width=True)
-    csv2 = psmsl_show.to_csv(index=False).encode('utf-8-sig')
-    st.download_button("국내 관측소 전처리 데이터 CSV 다운로드", data=csv2, file_name="korea_psmsl_preprocessed.csv", mime="text/csv")
-else:
-    st.info("국내 관측소(PSMSL) 데이터가 없습니다.")
-
-# -------------------------
-# 사용자 입력 대시보드 (프롬프트 설명 기반)
-st.header("3. 사용자 입력 대시보드 (보고서 계획표 기반)")
-st.markdown("아래 시각화는 사용자가 제공한 **보고서 계획표(텍스트)**를 바탕으로 자동 생성한 예시 데이터에 따른 시각화입니다. 실제 CSV/이미지를 제공하면 해당 데이터로 대체해 더 정확한 분석이 가능합니다.")
-
-# 3-1 대한민국 해수면 변화 추이 (지난 20년) — 꺾은선 + 온도 상관
-st.subheader("대한민국 해수면 변화 추이 (2004–2023) — 온도와 비교")
-kdf = user_data["korea_sealevel_20y"].copy()
-# 선택 기간 필터
-mask = (kdf["date"] >= pd.to_datetime(start_date)) & (kdf["date"] <= pd.to_datetime(end_date))
-kdf = kdf.loc[mask]
-if smoothing > 1:
-    kdf["value_mm_smooth"] = kdf["value_mm"].rolling(window=smoothing, min_periods=1).mean()
-else:
-    kdf["value_mm_smooth"] = kdf["value_mm"]
-# Plot: dual axis (Plotly express workaround: make secondary y via update)
-fig3 = px.line(kdf, x="date", y="value_mm_smooth", labels={"value_mm_smooth":"해수면 변화 (mm)","date":"연도"}, title="대한민국 연안: 연평균 해수면 변화 (예시)")
-fig3.add_scatter(x=kdf["date"], y=kdf["temp_c"], mode="lines", name="연평균기온(°C)", yaxis="y2")
-fig3.update_layout(
-    yaxis=dict(title="해수면 변화 (mm)"),
-    yaxis2=dict(title="연평균기온 (°C)", overlaying="y", side="right"),
-    legend_title_text="지표",
-)
-st.plotly_chart(fig3, use_container_width=True)
-st.markdown("**해석(예시):** 온도가 서서히 상승함에 따라(우측 축) 해수면도 장기적으로 상승 경향을 보입니다. 청소년·지역사회 영향 분석의 기초 자료로 활용하세요.")
-csv_korea = kdf.to_csv(index=False).encode('utf-8-sig')
-st.download_button("대한민국 해수면(보고서 기반) CSV 다운로드", data=csv_korea, file_name="korea_sealevel_2004_2023.csv", mime="text/csv")
-
-# 3-2 국가별 해수면 상승 예상치 — 막대그래프
-st.subheader("국가별 해수면 상승 예상치 비교 (예시)")
-country_df = user_data["country_compare"]
-fig4 = px.bar(country_df, x="국가", y="예상_상승_cm_2100", labels={"예상_상승_cm_2100":"2100년 예상 상승 (cm)"}, title="국가별 해수면 상승 예상치 (예시)")
-st.plotly_chart(fig4, use_container_width=True)
-csv_country = country_df.to_csv(index=False).encode('utf-8-sig')
-st.download_button("국가별 예상치 CSV 다운로드", data=csv_country, file_name="country_sea_level_projection_example.csv", mime="text/csv")
-
-# 3-3 피해 통계와 사례(청소년) — 원그래프 및 막대그래프
-st.subheader("피해 통계(청소년) — 기후 불안 응답 비율")
-youth_survey = user_data["youth_survey"]
-fig5 = px.pie(youth_survey, names="응답", values="비율", title="기후위기로 인한 불안감 비율(청소년, 예시)")
-st.plotly_chart(fig5, use_container_width=True)
-st.markdown("**설명(보고서 기반):** 저소득층 어린이·청소년의 76.3%가 기후위기 때문에 불안감을 느낀다는 조사(보고서 예시)를 반영한 비율입니다.")
-
-st.subheader("청소년: 기후위기가 미래 직업/진로에 미치는 영향 (예시)")
-yfj = user_data["youth_future_jobs"]
-fig6 = px.bar(yfj, x="영향_정도", y="응답수", labels={"응답수":"응답 수", "영향_정도":"영향 정도"}, title="청소년의 기후위기 인식(미래 직업에 대한 영향, 예시)")
-st.plotly_chart(fig6, use_container_width=True)
-csv_youth = yfj.to_csv(index=False).encode('utf-8-sig')
-st.download_button("청소년 설문(예시) CSV 다운로드", data=csv_youth, file_name="youth_survey_example.csv", mime="text/csv")
-
-# 3-4 텍스트 요약(보고서 템플릿) — 보고서 제목 및 서론/결론 템플릿 제공
-st.header("4. 보고서 작성 도움: 템플릿 (제목·서론·결론 예시)")
-st.markdown("**보고서 제목(가제)**: 🌊🏫 내일은 물 위의 학교? : 🚨 해수면 상승의 경고")
-st.subheader("서론 (예시)")
-st.write(
-    "최근 기후이상으로 폭염 및 자연재해가 증가하고 있으며, 지난 30년(1991–2020) 동안 한국 연안의 평균 해수면이 연평균 3.03mm 증가하여 약 9.1cm 상승한 연구 결과가 보고되었습니다. "
-    "이에 본 보고서는 해수면 상승이 청소년 세대에 미치는 영향(심리·생활·진로)을 데이터 기반으로 분석하고 정책적 제언을 제시합니다."
-)
-st.subheader("결론 및 제언 (예시)")
-st.write(
-    "해수면 상승은 단순한 자연현상이 아니라 기후위기의 결과이며, 청소년의 정신건강·주거·진로에 장기적 영향을 미칩니다. "
-    "정책 제언: (1) 학교 내 기후 심리 지원체계 구축, (2) 취약계층 대상 재난 안전망 강화, (3) 해안지역 장기 모니터링 및 이주·보호 정책 수립."
-)
-
-# -------------------------
-# 추가 정보: Kaggle API 인증 안내 (요청시 자동 표출)
-with st.expander("🔎 kaggle API 사용/인증 방법 (선택)"):
+    st.title("🌏 전세계 해수면 영향 지도")
     st.markdown(
-        """
-        Kaggle에서 데이터셋을 자동으로 가져오려면 `kaggle` 패키지를 사용해야 합니다.
-        1. Kaggle 계정에서 *My Account* -> *API*에서 `kaggle.json`을 발급받으세요.  
-        2. Codespaces/로컬 환경에서 `~/.kaggle/kaggle.json`으로 업로드하거나 환경변수로 설정하세요.  
-        3. 예) `pip install kaggle` 후 `kaggle datasets download -d <dataset-owner/dataset-name>` 사용.  
-        (주의) 이 앱은 현재 네트워크 또는 접근 권한에 따라 직접 kaggle 다운로드가 실패할 수 있으며, 실패 시 예시 데이터로 대체됩니다.
-        """
+        "마우스 커서를 올리면 **국가별 해수면 상승률**을 확인할 수 있습니다. "
+        "데이터는 보고서 예시를 기반으로 합니다."
     )
 
-# -------------------------
-# 앱 하단: 데이터 처리 원칙 및 주의사항
-st.sidebar.markdown("---")
-st.sidebar.header("데이터 처리 원칙")
-st.sidebar.markdown(
-    """
-    - 표준화된 컬럼: `date`, `value` (또는 변형 컬럼)을 우선 사용합니다.  
-    - 전처리: 결측치 처리, 형 변환, 중복 제거, 미래 날짜(오늘 이후) 제거를 수행합니다.  
-    - 캐싱: `@st.cache_data`로 외부 호출 캐시 적용(재실행 속도 향상).  
-    - CSV 다운로드 버튼을 통해 전처리된 표를 제공합니다.
-    """
-)
+    # 보고서 기반의 예시 데이터
+    map_df = pd.DataFrame({
+        "country": ["대한민국", "오스트레일리아", "미국", "몰디브", "방글라데시"],
+        "lat": [36.5, -25.0, 37.1, 3.2, 23.7],
+        "lon": [127.5, 133.0, -95.7, 73.5, 90.4],
+        "sea_level_trend_mm_per_year": [3.06, 4.0, 3.3, 6.5, 5.0]
+    })
+    
+    try:
+        # Plotly를 사용하여 상호작용 지도 생성
+        fig_map = px.scatter_mapbox(
+            map_df,
+            lat="lat",
+            lon="lon",
+            size="sea_level_trend_mm_per_year",
+            color="sea_level_trend_mm_per_year",
+            color_continuous_scale=px.colors.sequential.Teal,
+            hover_name="country",
+            hover_data={
+                "sea_level_trend_mm_per_year": ":.2f"
+            },
+            title="국가별 해수면 상승률(mm/yr)",
+            mapbox_style="carto-positron",
+            zoom=1,
+        )
+        fig_map.update_layout(
+            margin={"r":0,"t":40,"l":0,"b":0}
+        )
+        st.plotly_chart(fig_map, use_container_width=True)
+    except Exception as e:
+        st.error(f"지도 시각화 중 오류가 발생했습니다: {e}")
+        st.write("대신 데이터 표를 표시합니다.")
+        st.dataframe(map_df)
 
-st.caption("앱에서 제공된 일부 데이터는 네트워크/API 실패 시 내부 예시 데이터로 대체되었습니다. 실제 공개 데이터 사용 시에는 위 주석의 출처 URL을 확인하고 적절한 인증 및 파일 경로를 설정하세요.")
+# ---------------------------
+# 청소년 피해 설문 데이터 추가
+# ---------------------------
+def add_youth_survey_charts():
+    """청소년 피해 통계와 사례 섹션에 차트 추가"""
+    st.markdown("---")
+    st.subheader("청소년 대상 기후불안 설문 요약")
+    
+    # 데이터프레임 생성
+    survey_data = {
+        '항목': ['매우 그렇다', '그렇다', '불안감을 느끼지 않는다'],
+        '비율': [24.8, 51.5, 23.7]
+    }
+    survey_df = pd.DataFrame(survey_data)
+
+    age_data = {
+        '연령대': ['만 5~12세', '만 13~18세'],
+        '비율': [63.4, 36.6]
+    }
+    age_df = pd.DataFrame(age_data)
+
+    # 차트 시각화
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("### 불안감 응답 비율")
+        fig_pie = px.pie(survey_df, names='항목', values='비율', title="기후위기로 인한 불안감 응답 비율")
+        fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+        st.plotly_chart(fig_pie, use_container_width=True)
+    with col_b:
+        st.markdown("### 연령대 분포")
+        fig_bar = px.bar(age_df, x='연령대', y='비율', title="조사 대상 연령대 분포", labels={"연령대": "연령대", "비율": "비율(%)"})
+        fig_bar.update_traces(marker_color=THEME_MINT)
+        st.plotly_chart(fig_bar, use_container_width=True)
+        
+    st.markdown("설문 데이터 다운로드")
+    csv_data = survey_df.to_csv(index=False).encode('utf-8')
+    st.download_button("🔽 설문 데이터 CSV 다운로드", data=csv_data, file_name="youth_survey_summary.csv", mime="text/csv")
+
+
+# ---------------------------
+# 상단 보고서 개요(소제목 이모티콘/클릭 요약)
+# ---------------------------
+def report_overview():
+    """보고서 개요 섹션"""
+    st.markdown("### 📌 보고서 개요")
+    with st.expander("🌊 해수면 상승의 현실"):
+        st.markdown("바다는 거대한 열 저장소이며, 온난화로 인해 평균 해수면이 서서히 상승하고 있어요.")
+    with st.expander("🧊 뜨거워지는 지구, 녹아내리는 빙하"):
+        st.markdown("해수온 상승과 빙하 융해는 해수면 상승의 두 축입니다. 바다는 열팽창으로도 높아져요.")
+    with st.expander("💨 온실가스와 기후 경고"):
+        st.markdown("온실가스가 많아질수록 에너지가 지구에 머물고, 극한기상 빈도가 늘어납니다.")
+    with st.expander("📚 청소년과 미래 세대의 위기"):
+        st.markdown("폭염·침수·해충 증가 등은 학습·건강·정서에 영향을 줍니다.")
+    with st.expander("🌱 우리가 만들 해답, 우리의 실천"):
+        st.markdown("교실 26℃ 유지, 칼환기, 에너지 절약, 데이터 기반 제안으로 변화를 이끌 수 있어요.")
+
+# ---------------------------
+# (1) 포춘쿠키 탭
+# ---------------------------
+FORTUNES: List[str] = [
+    "교실 1°C 낮추기: 오후 블라인드 내리기",
+    "쉬는 시간 2분 칼환기: 앞·뒤 창문 활짝!",
+    "빈 교실 전원 OFF: 프로젝터·모니터 확인",
+    "냉방은 26°C, 선풍기와 병행",
+    "물병 챙기기: 열 스트레스 줄이기",
+    "그늘길 동선 짜기: 햇빛 강한 시간 피하기",
+    "우리 반 에너지 지킴이 지정하기",
+    "기후 데이터 한 장 공유: 오늘의 한 그래프",
+    "옥상 차열 페인트 제안서 데이터 붙이기",
+    "운동장 그늘막 설치 서명받기",
+]
+
+def fortune_cookie_tab():
+    """포춘쿠키 탭 내용"""
+    st.markdown("### 🥠 포춘쿠키 — 오늘의 실천 한 가지")
+    st.markdown('<div class="small">버튼을 눌러 오늘 바로 할 수 있는 짧고 구체적인 실천을 받아보세요.</div>', unsafe_allow_html=True)
+
+    if "fortune" not in st.session_state:
+        st.session_state["fortune"] = random.choice(FORTUNES)
+
+    if st.button("포춘쿠키 열기 🍪"):
+        st.session_state["fortune"] = random.choice(FORTUNES)
+
+    st.markdown(
+        f"""
+        <div class="card">
+          <span class="badge">오늘의 실천</span>
+          <h4 style="margin:.4rem 0 0 0; color:var(--brown)">{st.session_state['fortune']}</h4>
+          <p class="mini" style="margin:.4rem 0 0 0;">작은 행동이 모이면 교실이 달라집니다. 💚🤎</p>
+        </div>
+        """, unsafe_allow_html=True
+    )
+
+# ---------------------------
+# (2) 데이터 관측실 탭
+# ---------------------------
+def data_lab_tab():
+    """데이터 관측실 탭 내용"""
+    st.markdown("### 🔬 데이터 관측실 — 지표·지역·기간을 바꿔보세요")
+    st.markdown('<div class="small">※ 시연용 더미 데이터입니다. 실제 연결 시 NOAA/NASA/정부 공개 데이터로 교체하세요.</div>', unsafe_allow_html=True)
+
+    colc1, colc2, colc3 = st.columns([1, 1, 2])
+    with colc1:
+        kind = st.selectbox("지표 선택", ["해수면", "해수온", "폭염일수"], index=0)
+    with colc2:
+        region = st.selectbox("지역 선택", ["대한민국", "세계 평균"], index=0)
+    with colc3:
+        yr = st.slider("표시 연도 범위", min_value=1980, max_value=2025, value=(1995, 2025))
+
+    # 시계열 생성/필터
+    df = make_dummy_series(kind, region, 1980, 2025)
+    df = df[(df["date"].dt.year >= yr[0]) & (df["date"].dt.year <= yr[1])].copy()
+
+    # 라인(이동평균 옵션)
+    win = st.slider("스무딩(이동평균, 개월)", 1, 24, 12)
+    df["MA"] = df.sort_values("date")["value"].rolling(win, min_periods=1).mean()
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df["date"], y=df["value"], name="월별", opacity=0.35, line=dict(color=THEME_BROWN)))
+    fig.add_trace(go.Scatter(x=df["date"], y=df["MA"], name=f"{win}개월 평균", line=dict(width=3, color=THEME_MINT)))
+    st.plotly_chart(style_plot(fig, f"{df['group'].iloc[0]} — 시계열", "날짜", "값"), use_container_width=True)
+
+    # 한 줄 요약 캡션
+    if not df.empty:
+        v0, v1 = df["MA"].iloc[0], df["MA"].iloc[-1]
+        diff = v1 - v0
+        arrow = "⬆️" if diff > 0 else ("⬇️" if diff < 0 else "➡️")
+        st.caption(f"요약: {yr[0]}–{yr[1]} 기간 동안 {df['group'].iloc[0]}은(는) {arrow} {diff:+.2f} 변화했습니다.")
+
+    # 막대(카테고리 영향)
+    bar_df = make_dummy_bar(kind, region)
+    st.plotly_chart(bar_percent(bar_df, horizontal=True, title=f"{region} {kind} 관련 영향도(시연값, %)"), use_container_width=True)
+
+    # CSV 다운로드(전처리된 관측 데이터)
+    st.download_button(
+        "CSV 다운로드(관측실 데이터)",
+        data=df[["date", "value", "group", "MA"]].to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"observatory_{kind}_{region}_{yr[0]}_{yr[1]}.csv",
+        mime="text/csv"
+    )
+
+# ---------------------------
+# (3) 자료실 탭
+# ---------------------------
+SOURCES: List[tuple] = [
+    ("데이터 가이드", "NOAA(미 해양대기청) 포털", "https://www.noaa.gov/"),
+    ("데이터 가이드", "NASA Climate", "https://climate.nasa.gov/"),
+    ("정부 보고", "해양수산부: 우리나라 해수면 상승 현황", "https://www.mof.go.kr/doc/ko/selectDoc.do?docSeq=44140"),
+    ("참고 아틀라스", "National Atlas(해수면 영향)", "http://nationalatlas.ngii.go.kr/pages/page_3813.php"),
+    ("뉴스 사례", "연합뉴스: 베트남 농작물 피해", "http://yna.co.kr/view/AKR20240318090400076"),
+    ("실천 아이디어", "기후행동연구소/청소년 실천 기사", "https://climateaction.re.kr/news01/180492"),
+]
+
+def library_tab():
+    """자료실 탭 내용"""
+    st.markdown("### 🗂️ 자료실 — 출처/참고 링크 모음")
+    st.markdown('<div class="small">클릭하면 새 창으로 열립니다. 수업·보고서에 활용하세요.</div>', unsafe_allow_html=True)
+    for kind, title, url in SOURCES:
+        st.markdown(
+            f"""
+            <div class="card" style="margin-bottom:8px;">
+              <span class="badge">{kind}</span>
+              <div style="font-size:18px; font-weight:700; margin-top:6px;">🔗 <a href="{url}" target="_blank">{title}</a></div>
+              <div class="mini">URL: {url}</div>
+            </div>
+            """, unsafe_allow_html=True
+        )
+
+# ---------------------------
+# 상단 보고서 본문(서론/본론/결론 요약)
+# ---------------------------
+def report_body():
+    """보고서 본문 섹션"""
+    st.markdown("## 🧭 문제 제기(서론)")
+    st.markdown(
+        "최근 기후 이상과 함께 해수면 상승이 눈에 띄게 진행되고 있습니다. "
+        "바다는 지구의 열을 저장하고 순환시키는 거대한 장치인데, 온도가 올라가면 **열팽창**과 **빙하 융해**가 겹쳐 "
+        "해수면이 서서히 높아집니다. 이 변화는 해안 침식, 내륙 침수 위험 증가, 폭염·해충 증가 등으로 학생들의 일상과 "
+        "학습 환경에 직접적인 영향을 주고 있습니다.")
+    st.markdown("---")
+
+    st.markdown("## 🔍 본론 1 — 데이터로 본 해수면 상승의 현실·원인")
+    st.markdown(
+        "**1-1. 대한민국 해수면 변화 추이와 국제 데이터 분석**\n\n"
+        "최근 기후 변화로 나타나는 폭염 현상은 단순히 대기 문제만이 아니라, 바다의 변화와도 연결되어 있다. "
+        "바다는 지구에서 가장 큰 열 저장소로, 온도와 수위가 변하면 지구 전체의 기후 균형이 흔들리게 된다.\n\n"
+        "따라서 해수면의 상승이 실제로 어떤 양상으로 나타나고 있는지 확인하기 위해, 우리는 전 세계와 우리나라의 데이터를 각각 살펴보고 비교 분석하였다. "
+        "첫 번째로, 전 세계 평균 해수면 변화를 살펴보았다. 1880년 이후 지구 평균 해수면은 꾸준히 상승해 왔으며, 특히 1990년대 이후 그 속도가 눈에 띄게 빨라졌다. "
+        "이는 빙하가 녹아 바다로 유입되고, 바닷물이 열을 받아 팽창하기 때문으로 해석된다. 결국 바다가 뜨거워지고 있다는 사실을 수치로 확인할 수 있다.\n\n"
+        "이어서 1993년부터 2023년까지 위성 고도계로 측정한 호주 주변 해상 해수면 상승률 자료를 보면, 이 지역에서도 뚜렷한 상승세가 나타난다. "
+        "특히 남반구 해역은 해양 순환과 기후 패턴의 영향으로 상승 속도가 빠른 편인데, 이는 특정 지역이 다른 곳보다 더 큰 위험에 노출될 수 있다는 사실을 강조한다.\n\n"
+        "두 번째로, 우리나라 연안의 변화를 분석했다. 해양수산부의 관측에 따르면 지난 35년간 대한민국 연안의 평균 해수면은 약 10.7cm 상승하였다. "
+        "이는 세계 평균보다 빠른 속도로, 기후 변화의 영향을 우리 사회가 직접적으로 겪고 있음을 보여준다.")
+    
+    # 지도를 여기에 추가합니다.
+    create_interactive_map()
+    
+    st.markdown("---")
+    st.markdown("## 🧑‍🎓 본론 1-2 — 피해 통계와 사례(청소년)")
+    st.markdown(
+        "**1-2. 피해 통계와 사례(청소년)**\n\n"
+        "저소득층 어린이·청소년 4명 중 3명은 기후위기로 인한 불안감을 느끼고 있다는 설문조사 결과가 나왔다. "
+        "환경재단은 지난달 26일부터 지난 4일까지 설문조사를 실시한 결과 저소득층 어린이·청소년 76.3%가 기후위기로 인해 불안감을 느낀다고 답했다고 밝혔다. "
+        "조사 대상 어린이·청소년의 연령대: 만 5-12세 63.4%/ 만 13-18세 36.6%\n"
+        "‘기후위기로 인해 불안감과 무서움을 느낀 적이 있는가?’\n"
+        "‘매우 그렇다’ 24.8%\n"
+        "‘그렇다’ 51.5%\n"
+        "‘불안감을 느끼지 않는다’ 23.7%\n\n"
+        "기후재난에 직면한 취약계층 아이들이 겪는 불평등을 조금이나마 해소하고, 미래에 대한 희망을 품을 수 있도록 지원해야함을 알 수 있다. "
+        "이 세 가지 자료는 해수면 상승이 단순한 자연현상이 아니라 우리들이 만든 기후위기의 결과이며, 그 영향이 우리와 같은 청소년의 생활과 안전, 그리고 마음까지도 위협할 수 있음을 보여준다. "
+        "따라서 지금 우리가 어떤 대응을 하느냐가 앞으로의 미래를 결정하는 중요한 과제임을 알 수 있다. "
+        "이제 이러한 데이터를 바탕으로, 해수면 상승이 청소년과 미래 세대에 어떤 영향을 주는지 더 구체적으로 살펴보고, 나아가 정책적 대응의 필요성에 대해서도 탐구해 보겠다.")
+    
+    add_youth_survey_charts()
+
+    st.markdown("---")
+    st.markdown("## 🌍 본론 2 — 청소년과 미래에 미치는 영향 / 정책적 대응 필요성")
+    st.markdown(
+        "**2-1. 차오르는 바다와 흔들리는 청소년의 미래**\n\n"
+        "기온 상승에 따른 해수면 상승은 청소년들의 생활과 건강, 심리적 안정까지 위협받고 있다. "
+        "청소년들은 자신들이 마지막 세대가 될 수 있다는 불안과 무력감, 우울증에 시달리고 있으며, 폭염과 전염병 증가로 건강이 악화되고 있다. "
+        "농작물 생산 감소로 식량 공급이 줄면서 영양실조에 노출되는 등 다방면에서 피해가 발생하고 있다. "
+        "이러한 문제의 원인은 지구 온난화에 따른 해수면 상승과 극심한 기후변화에 있으며, 청소년들의 주거환경 불안정, 정신건강 악화, 건강 위협으로 이어진다.")
+    st.markdown("---")
+
+    st.markdown("## ✅ 결론 — 고1 눈높이로 정리한 우리의 선택")
+    st.markdown(
+        "해수면 상승은 멀리 있는 바다 이야기처럼 보일 수 있지만, 실제로는 교실의 온도, 등하굣길의 안전, "
+        "집안의 곰팡이 같은 아주 가까운 문제로 나타납니다. 그래서 우리는 **오늘 할 수 있는 일**부터 시작해야 합니다. "
+        "오후 햇빛이 강할 때 블라인드를 내려 교실 온도를 낮추고, 쉬는 시간에는 2분간 칼환기를 해 더운 공기를 내보냅니다. "
+        "빈 교실의 전원을 끄는 습관을 들이면 에너지도 아끼고 열도 줄일 수 있어요. 이런 작은 실천을 반 전체가 함께하면 "
+        "효과는 더 커집니다.\n\n"
+        "동시에 우리는 **데이터로 말하는 힘**을 키워야 합니다. 기온·해수면 그래프를 직접 그려 보고, "
+        "우리 학교 상황을 조사해보세요. 숫자와 근거를 붙여 학생회나 학교, 교육청에 **그늘막 설치**나 "
+        "**차열 페인트** 같은 구체적인 개선을 요구한다면, 어른들도 더 쉽게 움직일 수 있습니다. "
+        "바다가 뜨거워지는 속도를 바로 멈출 수는 없지만, 우리의 교실을 더 안전하고 시원하게 만드는 일은 "
+        "지금 당장 시작할 수 있습니다. **작은 변화가 모여 내일의 학교를 바꿉니다. 💚🤎**")
+
+# ---------------------------
+# 메인
+# ---------------------------
+def main():
+    """메인 앱 실행 함수"""
+    st.set_page_config(page_title="보고서 맞춤 대시보드", layout="wide")
+    st.title(APP_TITLE)
+
+    # 상단 보고서 개요/본문(클릭형 소제목)
+    report_overview()
+    report_body()
+    st.divider()
+
+    tabs = st.tabs(["🥠 포춘쿠키", "🔬 데이터 관측실", "🗂️ 자료실"])
+    with tabs[0]:
+        fortune_cookie_tab()
+    with tabs[1]:
+        data_lab_tab()
+    with tabs[2]:
+        library_tab()
+
+    st.caption("※ 본 앱의 데이터는 시연용 더미입니다. 실제 분석 시 NOAA/NASA/정부 공개 데이터를 동일 스키마(date, value, group)로 연결하세요.")
+
+if __name__ == "__main__":
+    main()
